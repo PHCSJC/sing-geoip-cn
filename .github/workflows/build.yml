@@ -56,22 +56,37 @@ jobs:
       - name: Verify rule-set
         run: |
           set -euo pipefail
-          echo "--- expected HIT (China) ---"
-          for ip in 119.29.29.29 223.5.5.5 110.242.69.21; do
-            out=$(./sing-box rule-set match --format binary dist/geoip-cn.srs "$ip" 2>&1 || true)
+          SRS=dist/geoip-cn.srs
+
+          check_hit() {
+            out=$(./sing-box rule-set match --format binary "$SRS" "$1" 2>&1 || true)
             case "$out" in
-              *"match rules"*) echo "  OK   $ip" ;;
-              *) echo "  FAIL $ip"; exit 1 ;;
+              *"match rules"*) return 0 ;;
+              *) return 1 ;;
             esac
+          }
+
+          fail=0
+
+          echo "--- must HIT (China) ---"
+          for ip in 119.29.29.29 223.5.5.5 110.242.69.21 1.116.1.1 43.166.192.1; do
+            if check_hit "$ip"; then echo "  OK   $ip"; else echo "  FAIL $ip"; fail=1; fi
           done
-          echo "--- expected miss (foreign) ---"
-          for ip in 8.8.8.8 1.1.1.1 142.251.152.119; do
-            out=$(./sing-box rule-set match --format binary dist/geoip-cn.srs "$ip" 2>&1 || true)
-            case "$out" in
-              *"match rules"*) echo "  FAIL $ip should not match"; exit 1 ;;
-              *) echo "  OK   $ip" ;;
-            esac
+
+          echo "--- must MISS (foreign) ---"
+          for ip in 8.8.8.8 1.1.1.1 142.251.152.119 20.205.243.166 104.16.124.96; do
+            if check_hit "$ip"; then echo "  FAIL $ip should not match"; fail=1; else echo "  OK   $ip"; fi
           done
+
+          # Regression guard: Clang.CN lists these as CN but they are
+          # physically abroad (Malakmadze Web LLC, Tele2, etc). Including
+          # them routes foreign sites direct. See build.py header.
+          echo "--- regression: must MISS (Clang.CN false positives) ---"
+          for ip in 162.222.90.70 5.255.61.1 31.222.234.1 77.216.50.1 94.118.188.1; do
+            if check_hit "$ip"; then echo "  FAIL $ip regressed (Clang.CN false positive)"; fail=1; else echo "  OK   $ip"; fi
+          done
+
+          exit $fail
 
       - name: Commit and push
         run: |
@@ -85,7 +100,6 @@ jobs:
           fi
           VER=$(cat dist/version)
           git commit -m "Update geoip-cn rule-set ${VER}"
-          # 防止并发推送被拒：拉取远端最新再重推，最多重试 5 次
           for i in 1 2 3 4 5; do
             if git push; then
               echo "pushed on attempt $i"

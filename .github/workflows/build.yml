@@ -14,12 +14,18 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-geoip-cn
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -39,9 +45,7 @@ jobs:
           ./sing-box version
 
       - name: Aggregate sources
-        run: |
-          set -euo pipefail
-          python3 build.py
+        run: python3 build.py
 
       - name: Compile rule-set
         run: |
@@ -69,12 +73,6 @@ jobs:
             esac
           done
 
-      - name: Write version
-        run: |
-          set -euo pipefail
-          echo "$(date -u +%Y%m%d%H%M)" > dist/version
-          cat dist/version
-
       - name: Commit and push
         run: |
           set -euo pipefail
@@ -82,22 +80,20 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dist/
           if git diff --cached --quiet; then
-            echo "no changes"
+            echo "no changes in dist/, nothing to commit"
             exit 0
           fi
           VER=$(cat dist/version)
           git commit -m "Update geoip-cn rule-set ${VER}"
-          git push
-
-      - name: Publish release
-        if: github.event_name != 'push'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.run_id }}
-          name: "geoip-cn $(date -u +%Y%m%d)"
-          files: |
-            dist/geoip-cn.srs
-            dist/geoip-cn.json
-            dist/version
-          draft: false
-          prerelease: false
+          # 防止并发推送被拒：拉取远端最新再重推，最多重试 5 次
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "pushed on attempt $i"
+              exit 0
+            fi
+            echo "push rejected, rebasing onto origin/main (attempt $i)"
+            git pull --rebase --autostash origin main || true
+            sleep $((i * 3))
+          done
+          echo "ERROR: push failed after 5 attempts"
+          exit 1

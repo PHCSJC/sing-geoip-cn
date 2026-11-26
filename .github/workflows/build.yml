@@ -88,26 +88,69 @@ jobs:
 
           exit $fail
 
+      - name: Read version
+        id: ver
+        run: |
+          set -euo pipefail
+          VERSION=$(cat dist/version)
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"
+
       - name: Commit and push
         run: |
           set -euo pipefail
+
+          # Work on a real branch. checkout@v4 leaves a detached HEAD for
+          # pull_request events, and `git pull --rebase` on a detached HEAD
+          # aborts with "You are not currently on a branch", which then makes
+          # every retry fail with "not currently on a branch".
+          git checkout -B main
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add dist/
           if git diff --cached --quiet; then
             echo "no changes in dist/, nothing to commit"
             exit 0
           fi
-          VER=$(cat dist/version)
+
+          VER="${{ steps.ver.outputs.value }}"
           git commit -m "Update geoip-cn rule-set ${VER}"
+
           for i in 1 2 3 4 5; do
-            if git push; then
+            if git push origin HEAD:main; then
               echo "pushed on attempt $i"
               exit 0
             fi
-            echo "push rejected, rebasing onto origin/main (attempt $i)"
-            git pull --rebase --autostash origin main || true
+            echo "push rejected (attempt $i), syncing with origin/main"
+            # Abort any half-finished rebase from a previous attempt so the
+            # retry starts from a clean tree.
+            git rebase --abort 2>/dev/null || true
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "rebase conflict on attempt $i, keeping remote version of dist/"
+              git rebase --abort 2>/dev/null || true
+              git reset --hard origin/main
+              echo "ERROR: dist/ changed upstream while building; will rebuild next run"
+              exit 0
+            fi
             sleep $((i * 3))
           done
           echo "ERROR: push failed after 5 attempts"
           exit 1
+
+      - name: Publish release
+        if: github.event_name != 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          # Do NOT use ${{ }} or $(date) inside a literal name -- the action
+          # does not run it through a shell, so it would render verbatim.
+          tag_name: ${{ steps.ver.outputs.value }}
+          name: geoip-cn ${{ steps.ver.outputs.value }}
+          files: |
+            dist/geoip-cn.srs
+            dist/geoip-cn.txt
+            dist/version
+          draft: false
+          prerelease: false

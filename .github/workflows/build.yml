@@ -1,0 +1,103 @@
+name: Build geoip-cn rule-set
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周一、周四 03:00 UTC (11:00 Asia/Shanghai)
+    - cron: '0 3 * * 1,4'
+  push:
+    branches: [ main ]
+    paths:
+      - 'build.py'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download sing-box
+        env:
+          SB_VERSION: '1.14.3'
+        run: |
+          set -euo pipefail
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/sing-box-${SB_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL "$URL" -o sb.tar.gz
+          tar xzf sb.tar.gz
+          mv "sing-box-${SB_VERSION}-linux-amd64/sing-box" ./sing-box
+          chmod +x ./sing-box
+          ./sing-box version
+
+      - name: Aggregate sources
+        run: |
+          set -euo pipefail
+          python3 build.py
+
+      - name: Compile rule-set
+        run: |
+          set -euo pipefail
+          ./sing-box rule-set compile cache/rule-set-src.json -o dist/geoip-cn.srs
+          ls -lh dist/
+
+      - name: Verify rule-set
+        run: |
+          set -euo pipefail
+          echo "--- expected HIT (China) ---"
+          for ip in 119.29.29.29 223.5.5.5 110.242.69.21; do
+            out=$(./sing-box rule-set match --format binary dist/geoip-cn.srs "$ip" 2>&1 || true)
+            case "$out" in
+              *"match rules"*) echo "  OK   $ip" ;;
+              *) echo "  FAIL $ip"; exit 1 ;;
+            esac
+          done
+          echo "--- expected miss (foreign) ---"
+          for ip in 8.8.8.8 1.1.1.1 142.251.152.119; do
+            out=$(./sing-box rule-set match --format binary dist/geoip-cn.srs "$ip" 2>&1 || true)
+            case "$out" in
+              *"match rules"*) echo "  FAIL $ip should not match"; exit 1 ;;
+              *) echo "  OK   $ip" ;;
+            esac
+          done
+
+      - name: Write version
+        run: |
+          set -euo pipefail
+          echo "$(date -u +%Y%m%d%H%M)" > dist/version
+          cat dist/version
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/
+          if git diff --cached --quiet; then
+            echo "no changes"
+            exit 0
+          fi
+          VER=$(cat dist/version)
+          git commit -m "Update geoip-cn rule-set ${VER}"
+          git push
+
+      - name: Publish release
+        if: github.event_name != 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.run_id }}
+          name: "geoip-cn $(date -u +%Y%m%d)"
+          files: |
+            dist/geoip-cn.srs
+            dist/geoip-cn.json
+            dist/version
+          draft: false
+          prerelease: false
